@@ -1,0 +1,231 @@
+root:usr1:static ip: 192.168.96.96 #10.11.231.199
+ssh port: 52422
+
+# cfdisk /dev/sda
+# dpkg-reconfigure keyboard-configuration
+# reboot
+# nano /etc/apt/sources.list (comment cdrom)
+# apt update -y && apt upgrade -y
+# apt install sudo emacs-nox ufw fail2ban portsentry
+# sudo nano /etc/sudoers
+usr1 ALL(ALL:ALL) ALL
+log to non-root user and use sudo
+$ sudo emacs /etc/network/interfaces
+comment existing enp0s3 interface
+add: auto enp0s3
+
+$ sudo emacs /etc/network/interfaces.d/enp0s3
+----------------------------------------------------------------------------
+iface enp0s3 inet static
+      address 192.168.96.96 # 10.11.42.21 #same network as host and !taken
+      netmask 255.255.255.252 # netmask /30
+      gateway 192.168.96.254 # 10.11.255.255 # same as host
+      broadcast 192.168.96.255 #same as host
+----------------------------------------------------------------------------
+10.1X.0.0 is the network needed where X is the cluster
+dns-nameservers is the same for cluster 1, 2 and 3
+https://fr.wikipedia.org/wiki/Sous-r%C3%A9seau
+
+sudo service networking restart
+ip & netmask (ip addr)
+gateway (ip r | grep default)
+
+SSH----------
+Note: The Internet Assigned Numbers Authority (IANA) is responsible for the global coordination of the DNS Root, IP addressing, and other Internet protocol resources. It is good practice to follow their port assignment guidelines. Having said that, port numbers are divided into three ranges: Well Known Ports, Registered Ports, and Dynamic and/or Private Ports. The Well Known Ports are those from 0 through 1023 and SHOULD NOT be used. Registered Ports are those from 1024 through 49151 should also be avoided too. Dynamic and/or Private Ports are those from 49152 through 65535 and can be used. Though nothing is stopping you from using reserved port numbers, our suggestion may help avoid technical issues with port allocation in the future.
+-------------
+$ sudo emacs /etc/ssh/sshd_config
+Uncomment Port 22 and replace it by Port 52422 (line 13)
+Uncomment 'PermitRootLogin' and replace 'prohibit-password' by 'no' (line 32)
+Uncomment 'PubkeyAuthentication yes' (line 37)
+$ sudo service sshd restart
+
+(from client side
+- `ssh-keygen`
+- `ssh-copy-id -i ~/.ssh/id_rsa.pub usr1@192.168.96.96 -p 52422`
+- `ssh usr1@10.11.231.199 -p 52422`
+)
+
+Firewall-------
+
+$ sudo ufw status
+$ sudo ufw enable
+$ sudo ufw allow 52422/tcp 	#ssh
+$ sudo ufw allow 80/tcp 	#http
+$ sudo ufw allow 443		#https
+
+DOS-----------
+https://blog.rapid7.com/2017/02/13/how-to-protect-ssh-and-apache-using-fail2ban-on-ubuntu-linux/
+http://viruslocker.free.fr/?page_id=728
+
+/etc/fail2ban/jail.local
+
+[ssh]
+enabled = true
+port = 52422
+filter = sshd
+action = iptables[name=SSH, port=52422, protocol=tcp]
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 900
+
+/etc/fail2ban/jail.conf
+after HTTP servers
+
+[http-get-dos]
+enabled = true
+port = http,https
+filter = http-get-dos
+logpath = /var/log/apache2/access.log (le fichier d'access sur server web)
+maxretry = 300
+findtime = 300
+bantime = 600
+action = iptables[name=HTTP, port=http, protocol=tcp]
+
+/etc/fail2ban/filter.d/http-get-dos.conf
+
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST).*
+ignoreregex =
+
+$ sudo service fail2ban restart
+$ sudo tail -f /var/log/fail2ban.log (to verify) (alias flogs)
+$ sudo fail2ban-client status ssh (also)
+
+
+Port protection--------------
+/etc/portsentry/portsentry.conf
+
+BLOCK_UDP="1" (line 135)
+BLOCK_TCP="1" (line 136)
+
+/etc/default/portsentry
+
+TCP_MODE="atcp" (from tcp to atcp)
+UDP_MODE="audp" (from udp to audp)
+comment every KILL_ROUTE except:
+		KILL_ROUTE="/sbin/iptables -I INPUT -s $TARGET$ -j DROP"
+comment KILL_HOSTS_DENY="ALL: $TARGET$ : DENY
+
+$ sudo service portsentry restart
+
+https://wiki.debian-fr.xyz/Portsentry
+
+(TO TEST in another machine
+$ nmap -v -PN -p 0-2000,60000 10.11.231.199
+
+check if the machine was blocked:
+$ cat /etc/hosts.deny
+$ ip r
+
+to unblock the machine
+Remove from /etc/hosts.deny
+ip r del <SENDER_IP>
+)
+
+stop unused services --------------
+
+check enabled services with:
+$ sudo systemctl list-unit-files | grep enabled
+
+sudo systemctl disable console-setup.service
+sudo systemctl disable apt-daily.timer
+sudo systemctl disable apt-daily-upgrade.timer
+sudo systemctl disable syslog.service
+sudo systemctl disable keyboard-setup.service
+sudo systemctl disable bluetooth.service
+
+update script ----------------------
+
+https://crontab.guru/
+
+update.sh
+
+sudo apt-get update -y >> /var/log/update_script.log
+sudo apt-get upgrade -y >> /var/log/update_script.log
+
+sudo crontab -e
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+@reboot sudo /home/usr1/update.sh
+0 4 * * 1 sudo /home/usr1/update.sh
+
+cron monitor ----------------------
+
+#!/bin/bash
+
+if [[ $(($(date +%s) - $(date +%s -r /etc/crontab))) -lt 86400 ]]
+then
+	echo "Crontab file has been modified" | sudo /usr/sbin/sendmail root
+fi
+
+add in sudo crontab -e
+0 0 * * * sudo /home/usr1/monitor.sh
+
+$ chmod +x monitor.sh update.sh
+$ sudo systemctl enable cron #make sure is running
+
+
+-------------------------------------------------------
+https://www.digitalocean.com/community/tutorials/how-to-create-a-self-signed-ssl-certificate-for-apache-in-ubuntu-16-04
+
+optional part-------------------
+
+sudo apt install git
+----------------------------------------------------------------------------
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -subj "/C=FR/O=42/OU=Roger/CN=10.11.231.199" -keyout /etc/ssl/private/apache-selfsigned.key -out /etc/ssl/certs/apache-selfsigned.crt
+----------------------------------------------------------------------------
+
+/etc/apache2/conf-available/ssl-params.con
+
+
+# from https://cipherli.st/
+# and https://raymii.org/s/tutorials/Strong_SSL_Security_On_Apache2.html
+
+SSLCipherSuite EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH
+SSLProtocol All -SSLv2 -SSLv3 -TLSv1 -TLSv1.1
+SSLHonorCipherOrder On
+
+Header always set Strict-Transport-Security "max-age=63072000; includeSubdomains"
+
+Header always set X-Frame-Options DENY
+Header always set X-Content-Type-Options nosniff
+# Requires Apache >= 2.4
+SSLCompression off
+SSLSessionTickets Off
+SSLUseStapling on
+SSLStaplingCache "shmcb:logs/stapling-cache(150000)"
+
+cp /etc/apache2/sites-available/default-ssl.conf /etc/apache2/sites-available/default-ssl.conf.bak
+----------------------------------------------------------------------------
+add/change:
+	ServerAdmin gde-pass@student.42.fr
+	ServerName	192.168.99.100
+	SSLCertificateFile	/etc/ssl/certs/apache-selfsigned.crt
+	SSLCertificateKeyFile /etc/ssl/private/apache-selfsigned.key
+----------------------------------------------------------------------------
+Uncomment:
+	  BrowserMatch "MSIE [2-6]" \
+                   nokeepalive ssl-unclean-shutdown \
+                   downgrade-1.0 force-response-1.0
+
+
+/etc/apache2/sites-available/000-default.conf
+----------------------------------------------------------------------------
+add
+
+	Redirect "/" "https://10.11.231.199/" after DocumentRoot
+----------------------------------------------------------------------------
+(if permanent redirect Redirect permanent "/" "https://your_domain_or_IP/")
+
+sudo a2enmod ssl
+sudo a2enmod headers
+sudo a2ensite default-ssl
+sudo a2enconf ssl-params
+sudo apache2ctl configtest  #(message telling you that the ServerName directive is not set globally, do not harm) (to get rid modif /etc/apache2/apache2.conf)
+sudo systemctl restart apache2
+
+docker: deployment automation
+
+EOF
